@@ -329,6 +329,7 @@
                 <canvas id="gameCanvas" width="1100" height="700"></canvas>
                 <div class="overlay-stats">
                     <div>⚡ Lasers: <span id="laserCount">0</span></div>
+                    <div>🍎 Food: <span id="foodCount">0</span></div>
                     <div>💀 Deaths: <span id="deathCount">0</span></div>
                     <div>⏱️ Time: <span id="timeAlive">0</span>s</div>
                 </div>
@@ -344,7 +345,7 @@
         </div>
 
         <div class="info-panel">
-            <strong>🧬 Advanced Evolution System:</strong> Each fish has a deep neural network (8→16→8→2) that processes laser positions, velocities, distances, and angles. The genetic algorithm uses tournament selection, elitism, crossover, and adaptive mutation. Watch as fish evolve complex dodging behaviors over generations!
+            <strong>🧬 Advanced Evolution System:</strong> Each fish has a deep neural network (14→24→16→2) that processes laser positions, velocities, distances, angles, AND food locations + hunger levels. Fish must balance dodging lasers while hunting for food to survive. The edges are lined with deadly lasers - fish that stick to the walls will die! The genetic algorithm uses tournament selection, elitism, crossover, and adaptive mutation. Watch as fish evolve complex behaviors: dodging lasers, hunting food, and staying away from dangerous edges!
             
             <div class="metrics-grid">
                 <div class="metric-card">
@@ -378,6 +379,8 @@
         let population = [];
         let lasers = [];
         let particles = [];
+        let foods = [];
+        let edgeLasers = [];
         let isRunning = false;
         let isPaused = false;
         let speedMultiplier = 1;
@@ -396,7 +399,12 @@
             ELITE_COUNT: 6,
             TOURNAMENT_SIZE: 7,
             CROSSOVER_RATE: 0.8,
-            MAX_GENERATION_TIME: 8000
+            MAX_GENERATION_TIME: 8000,
+            FOOD_SPAWN_RATE: 0.02,
+            MAX_FOOD: 12,
+            FOOD_VALUE: 100,
+            HUNGER_RATE: 0.15,
+            STARVATION_THRESHOLD: 0
         };
 
         // Particle effect class
@@ -435,9 +443,69 @@
             }
         }
 
+        // Food class
+        class Food {
+            constructor() {
+                // Spawn in safe zone (away from edges)
+                this.x = 150 + Math.random() * (canvas.width - 300);
+                this.y = 150 + Math.random() * (canvas.height - 300);
+                this.radius = 12;
+                this.glow = 0;
+                this.eaten = false;
+                
+                // GSAP pulsing animation
+                gsap.to(this, {
+                    glow: 1,
+                    duration: 0.8,
+                    repeat: -1,
+                    yoyo: true,
+                    ease: "power1.inOut"
+                });
+            }
+
+            draw() {
+                if (this.eaten) return;
+
+                ctx.save();
+                
+                // Outer glow
+                const glowSize = this.radius * (2.5 + this.glow * 0.5);
+                const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, glowSize);
+                gradient.addColorStop(0, 'rgba(0, 255, 100, 0.8)');
+                gradient.addColorStop(0.5, 'rgba(0, 255, 150, 0.4)');
+                gradient.addColorStop(1, 'rgba(0, 255, 100, 0)');
+                
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, glowSize, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Food body
+                ctx.fillStyle = '#00ff88';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Highlight
+                ctx.fillStyle = 'rgba(200, 255, 200, 0.8)';
+                ctx.beginPath();
+                ctx.arc(this.x - this.radius * 0.3, this.y - this.radius * 0.3, this.radius * 0.4, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Ring
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius * 1.3, 0, Math.PI * 2);
+                ctx.stroke();
+
+                ctx.restore();
+            }
+        }
+
         // Advanced Neural Network with multiple layers
         class AdvancedNeuralNetwork {
-            constructor(layers = [10, 20, 12, 2]) {
+            constructor(layers = [14, 24, 16, 2]) {
                 this.layers = layers;
                 this.weights = [];
                 this.biases = [];
@@ -555,7 +623,7 @@
                 this.size = 18;
                 this.alive = true;
                 this.fitness = 0;
-                this.brain = brain || new AdvancedNeuralNetwork([10, 20, 12, 2]);
+                this.brain = brain || new AdvancedNeuralNetwork([14, 24, 16, 2]);
                 this.hue = Math.random() * 360;
                 this.saturation = 70 + Math.random() * 30;
                 this.lightness = 50 + Math.random() * 20;
@@ -565,9 +633,11 @@
                 this.distanceTraveled = 0;
                 this.lastInputs = [];
                 this.survivalTime = 0;
+                this.hunger = 100; // New hunger system
+                this.foodEaten = 0;
             }
 
-            think(lasers) {
+            think(lasers, foods) {
                 // Find 2 closest lasers with velocity and trajectory info
                 const closestLasers = lasers
                     .map(laser => {
@@ -591,6 +661,18 @@
                             futureDist,
                             danger: dist < 200 ? (200 - dist) / 200 : 0
                         };
+                    })
+                    .sort((a, b) => a.dist - b.dist)
+                    .slice(0, 2);
+
+                // Find 2 closest foods
+                const closestFoods = foods
+                    .filter(f => !f.eaten)
+                    .map(food => {
+                        const dx = food.x - this.x;
+                        const dy = food.y - this.y;
+                        const dist = Math.hypot(dx, dy);
+                        return { food, dist, dx, dy };
                     })
                     .sort((a, b) => a.dist - b.dist)
                     .slice(0, 2);
@@ -625,15 +707,28 @@
                     }
                 }
 
+                // Add info for closest foods
+                for (let i = 0; i < 2; i++) {
+                    if (closestFoods[i]) {
+                        const food = closestFoods[i];
+                        inputs.push(1 - Math.min(food.dist / 400, 1)); // Distance
+                        inputs.push(food.dx / 400); // Direction X
+                        inputs.push(food.dy / 400); // Direction Y
+                    } else {
+                        inputs.push(0, 0, 0);
+                    }
+                }
+
                 // Add fish's own state
                 inputs.push(this.x / canvas.width);
                 inputs.push(this.y / canvas.height);
                 inputs.push(this.vx / 6);
                 inputs.push(this.vy / 6);
+                inputs.push(this.hunger / 100); // Hunger level
 
-                // Ensure exactly 10 inputs (2 lasers × 5 + own state × 4)
-                while (inputs.length < 10) inputs.push(0);
-                inputs = inputs.slice(0, 10);
+                // Ensure exactly 14 inputs (2 lasers × 5 + 2 foods × 3 + own state × 5)
+                while (inputs.length < 14) inputs.push(0);
+                inputs = inputs.slice(0, 14);
 
                 this.lastInputs = inputs;
                 
@@ -672,21 +767,48 @@
                 // Track distance traveled
                 this.distanceTraveled += Math.hypot(this.x - oldX, this.y - oldY);
 
-                // Soft boundaries with gradual pushback
-                const margin = 50;
-                if (this.x < margin) this.vx += (margin - this.x) * 0.02;
-                if (this.x > canvas.width - margin) this.vx -= (this.x - (canvas.width - margin)) * 0.02;
-                if (this.y < margin) this.vy += (margin - this.y) * 0.02;
-                if (this.y > canvas.height - margin) this.vy -= (this.y - (canvas.height - margin)) * 0.02;
+                // Gentle center-pulling force to discourage edge-hugging
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                const distFromCenter = Math.hypot(this.x - centerX, this.y - centerY);
+                const maxSafeDistance = Math.min(canvas.width, canvas.height) * 0.42;
+                
+                if (distFromCenter > maxSafeDistance) {
+                    const pushStrength = (distFromCenter - maxSafeDistance) * 0.003;
+                    const angleToCenter = Math.atan2(centerY - this.y, centerX - this.x);
+                    this.vx += Math.cos(angleToCenter) * pushStrength;
+                    this.vy += Math.sin(angleToCenter) * pushStrength;
+                }
+
+                // Gentle pushback near edges (not instant death zone)
+                const warningZone = 60;
+                if (this.x < warningZone || this.x > canvas.width - warningZone ||
+                    this.y < warningZone || this.y > canvas.height - warningZone) {
+                    const edgePush = 0.2;
+                    if (this.x < warningZone) this.vx += edgePush;
+                    if (this.x > canvas.width - warningZone) this.vx -= edgePush;
+                    if (this.y < warningZone) this.vy += edgePush;
+                    if (this.y > canvas.height - warningZone) this.vy -= edgePush;
+                }
 
                 // Clamp position
                 this.x = Math.max(this.size, Math.min(canvas.width - this.size, this.x));
                 this.y = Math.max(this.size, Math.min(canvas.height - this.size, this.y));
 
+                // Hunger system
+                this.hunger -= CONFIG.HUNGER_RATE;
+                if (this.hunger <= CONFIG.STARVATION_THRESHOLD) {
+                    this.die('starvation');
+                    return;
+                }
+
                 this.survivalTime++;
 
-                // Improved fitness: exponential survival reward + near miss bonus
-                this.fitness = Math.pow(this.survivalTime, 1.5) + (this.nearMisses * 50) + (this.distanceTraveled * 0.02);
+                // Improved fitness: exponential survival + food eaten + near miss bonus
+                this.fitness = Math.pow(this.survivalTime, 1.5) + 
+                               (this.foodEaten * 500) + 
+                               (this.nearMisses * 50) + 
+                               (this.distanceTraveled * 0.02);
                 
                 // Animate tail
                 this.tailAngle += 0.15;
@@ -701,10 +823,12 @@
                 const angle = Math.atan2(this.vy, this.vx);
                 ctx.rotate(angle);
 
-                // Fish glow/aura
+                // Fish glow/aura (color changes based on hunger)
+                const hungerRatio = this.hunger / 100;
+                const auraHue = this.hue + (hungerRatio < 0.3 ? 180 : 0); // Turn red when hungry
                 const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, this.size * 2);
-                gradient.addColorStop(0, `hsla(${this.hue}, ${this.saturation}%, ${this.lightness}%, 0.3)`);
-                gradient.addColorStop(1, `hsla(${this.hue}, ${this.saturation}%, ${this.lightness}%, 0)`);
+                gradient.addColorStop(0, `hsla(${auraHue}, ${this.saturation}%, ${this.lightness}%, ${0.3 + (1 - hungerRatio) * 0.3})`);
+                gradient.addColorStop(1, `hsla(${auraHue}, ${this.saturation}%, ${this.lightness}%, 0)`);
                 ctx.fillStyle = gradient;
                 ctx.beginPath();
                 ctx.arc(0, 0, this.size * 2, 0, Math.PI * 2);
@@ -719,6 +843,14 @@
                 ctx.ellipse(0, 0, this.size * 1.2, this.size * 0.7, 0, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.stroke();
+
+                // Hunger bar above fish
+                ctx.rotate(-angle); // Un-rotate for hunger bar
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                ctx.fillRect(-this.size, -this.size * 2, this.size * 2, 4);
+                ctx.fillStyle = hungerRatio > 0.3 ? '#00ff88' : '#ff0000';
+                ctx.fillRect(-this.size, -this.size * 2, this.size * 2 * hungerRatio, 4);
+                ctx.rotate(angle); // Re-rotate
 
                 // Dorsal fin
                 ctx.beginPath();
@@ -780,14 +912,16 @@
                 }
             }
 
-            die() {
+            die(reason = 'laser') {
                 this.alive = false;
                 totalDeaths++;
                 deathsThisGen++;
                 
+                const particleColor = reason === 'starvation' ? '#666666' : this.color;
+                
                 // Create death particles with GSAP
                 for (let i = 0; i < 20; i++) {
-                    const particle = new Particle(this.x, this.y, this.color);
+                    const particle = new Particle(this.x, this.y, particleColor);
                     particles.push(particle);
                     
                     // GSAP animation for particles
@@ -929,11 +1063,92 @@
                 population.push(new Fish());
             }
             lasers = [];
+            foods = [];
             particles = [];
             frameCount = 0;
             deathsThisGen = 0;
             
+            // Create edge lasers
+            createEdgeLasers();
+            
             addLog(`🐠 Generation ${generation} spawned with ${CONFIG.POPULATION_SIZE} fish`);
+        }
+
+        // Create deadly edge lasers
+        function createEdgeLasers() {
+            // Edge lasers are now just collision zones, visuals handled by drawEdgeDanger()
+            edgeLasers = [];
+            const spacing = 20;
+            const edgeDepth = 30; // How far from actual edge
+            
+            // Top edge
+            for (let x = 0; x < canvas.width; x += spacing) {
+                edgeLasers.push({ x, y: edgeDepth, active: true });
+            }
+            
+            // Bottom edge
+            for (let x = 0; x < canvas.width; x += spacing) {
+                edgeLasers.push({ x, y: canvas.height - edgeDepth, active: true });
+            }
+            
+            // Left edge
+            for (let y = 0; y < canvas.height; y += spacing) {
+                edgeLasers.push({ x: edgeDepth, y, active: true });
+            }
+            
+            // Right edge
+            for (let y = 0; y < canvas.height; y += spacing) {
+                edgeLasers.push({ x: canvas.width - edgeDepth, y, active: true });
+            }
+        }
+
+        // Draw clean edge danger zones
+        function drawEdgeDanger() {
+            const dangerWidth = 80;
+            const pulse = Math.sin(frameCount * 0.05) * 0.2 + 0.8;
+            
+            ctx.save();
+            
+            // Top edge
+            const topGradient = ctx.createLinearGradient(0, 0, 0, dangerWidth);
+            topGradient.addColorStop(0, `rgba(255, 0, 0, ${0.6 * pulse})`);
+            topGradient.addColorStop(0.5, `rgba(255, 0, 0, ${0.3 * pulse})`);
+            topGradient.addColorStop(1, 'rgba(255, 0, 0, 0)');
+            ctx.fillStyle = topGradient;
+            ctx.fillRect(0, 0, canvas.width, dangerWidth);
+            
+            // Bottom edge
+            const bottomGradient = ctx.createLinearGradient(0, canvas.height, 0, canvas.height - dangerWidth);
+            bottomGradient.addColorStop(0, `rgba(255, 0, 0, ${0.6 * pulse})`);
+            bottomGradient.addColorStop(0.5, `rgba(255, 0, 0, ${0.3 * pulse})`);
+            bottomGradient.addColorStop(1, 'rgba(255, 0, 0, 0)');
+            ctx.fillStyle = bottomGradient;
+            ctx.fillRect(0, canvas.height - dangerWidth, canvas.width, dangerWidth);
+            
+            // Left edge
+            const leftGradient = ctx.createLinearGradient(0, 0, dangerWidth, 0);
+            leftGradient.addColorStop(0, `rgba(255, 0, 0, ${0.6 * pulse})`);
+            leftGradient.addColorStop(0.5, `rgba(255, 0, 0, ${0.3 * pulse})`);
+            leftGradient.addColorStop(1, 'rgba(255, 0, 0, 0)');
+            ctx.fillStyle = leftGradient;
+            ctx.fillRect(0, 0, dangerWidth, canvas.height);
+            
+            // Right edge
+            const rightGradient = ctx.createLinearGradient(canvas.width, 0, canvas.width - dangerWidth, 0);
+            rightGradient.addColorStop(0, `rgba(255, 0, 0, ${0.6 * pulse})`);
+            rightGradient.addColorStop(0.5, `rgba(255, 0, 0, ${0.3 * pulse})`);
+            rightGradient.addColorStop(1, 'rgba(255, 0, 0, 0)');
+            ctx.fillStyle = rightGradient;
+            ctx.fillRect(canvas.width - dangerWidth, 0, dangerWidth, canvas.height);
+            
+            // Add warning lines
+            ctx.strokeStyle = `rgba(255, 50, 50, ${0.8 * pulse})`;
+            ctx.lineWidth = 3;
+            ctx.setLineDash([10, 10]);
+            ctx.strokeRect(dangerWidth / 2, dangerWidth / 2, canvas.width - dangerWidth, canvas.height - dangerWidth);
+            ctx.setLineDash([]);
+            
+            ctx.restore();
         }
 
         // Tournament selection
@@ -951,10 +1166,35 @@
             population.forEach(fish => {
                 if (!fish.alive) return;
                 
+                // Check regular lasers
                 lasers.forEach(laser => {
                     const dist = Math.hypot(laser.x - fish.x, laser.y - fish.y);
                     if (dist < fish.size + laser.radius) {
-                        fish.die();
+                        fish.die('laser');
+                    }
+                });
+                
+                // Check edge lasers - only kill if VERY close to edge
+                edgeLasers.forEach(laser => {
+                    const dist = Math.hypot(laser.x - fish.x, laser.y - fish.y);
+                    if (dist < fish.size + 5) { // Much smaller collision radius
+                        fish.die('edge');
+                    }
+                });
+                
+                // Check food collision
+                foods.forEach(food => {
+                    if (food.eaten) return;
+                    const dist = Math.hypot(food.x - fish.x, food.y - fish.y);
+                    if (dist < fish.size + food.radius) {
+                        food.eaten = true;
+                        fish.hunger = Math.min(100, fish.hunger + CONFIG.FOOD_VALUE);
+                        fish.foodEaten++;
+                        
+                        // Create eating particles
+                        for (let i = 0; i < 10; i++) {
+                            particles.push(new Particle(food.x, food.y, '#00ff88'));
+                        }
                     }
                 });
             });
@@ -1052,6 +1292,7 @@
             gsap.to('#avgFitness', { innerHTML: avgFitness, duration: 0.3, snap: { innerHTML: 1 } });
             
             document.getElementById('laserCount').textContent = lasers.length;
+            document.getElementById('foodCount').textContent = foods.length;
             document.getElementById('deathCount').textContent = deathsThisGen;
             document.getElementById('timeAlive').textContent = Math.round(frameCount / 60);
             document.getElementById('totalDeaths').textContent = totalDeaths;
@@ -1166,12 +1407,20 @@
                 if (lasers.length < CONFIG.MAX_LASERS && Math.random() < CONFIG.LASER_SPAWN_RATE) {
                     lasers.push(new Laser());
                 }
+                
+                // Spawn food
+                if (foods.length < CONFIG.MAX_FOOD && Math.random() < CONFIG.FOOD_SPAWN_RATE) {
+                    foods.push(new Food());
+                }
 
                 // Update lasers
                 lasers = lasers.filter(laser => {
                     laser.update();
                     return !laser.isOffScreen();
                 });
+                
+                // Remove eaten food
+                foods = foods.filter(food => !food.eaten);
 
                 // Update particles
                 particles = particles.filter(p => {
@@ -1182,7 +1431,7 @@
                 // Update fish
                 population.forEach(fish => {
                     if (fish.alive) {
-                        fish.think(lasers);
+                        fish.think(lasers, foods);
                         fish.update();
                     }
                 });
@@ -1210,8 +1459,14 @@
             }
             ctx.restore();
 
+            // Draw edge danger zones (clean red borders)
+            drawEdgeDanger();
+
             // Draw particles
             particles.forEach(p => p.draw());
+
+            // Draw food
+            foods.forEach(food => food.draw());
 
             // Draw lasers
             lasers.forEach(laser => laser.draw());
